@@ -87,7 +87,6 @@ CreateSocketFactory() {
 void DevToolsManagerDelegate::StartHttpHandler() {
   content::DevToolsAgentHost::StartRemoteDebuggingServer(
       CreateSocketFactory(),
-      std::string(),
       base::FilePath(),
       base::FilePath());
 }
