@@ -64,6 +64,18 @@ bool g_suppress_renderer_process_restart = false;
 // Custom schemes to be registered to handle service worker.
 std::string g_custom_service_worker_schemes = "";
 
+bool IsSameWebSite(content::BrowserContext* browser_context,
+                   const GURL& src_url,
+                   const GURL& dest_url) {
+  return content::SiteInstance::IsSameWebSite(browser_context, src_url,
+                                              dest_url) ||
+         // `IsSameWebSite` doesn't seem to work for some URIs such as `file:`,
+         // handle these scenarios by comparing only the site as defined by
+         // `GetSiteForURL`.
+         content::SiteInstance::GetSiteForURL(browser_context, dest_url) ==
+             src_url;
+}
+
 }  // namespace
 
 // static
@@ -122,12 +134,7 @@ bool AtomBrowserClient::ShouldCreateNewSiteInstance(
 
   // Create new a SiteInstance if navigating to a different site.
   auto src_url = current_instance->GetSiteURL();
-  return
-      !content::SiteInstance::IsSameWebSite(browser_context, src_url, url) &&
-      // `IsSameWebSite` doesn't seem to work for some URIs such as `file:`,
-      // handle these scenarios by comparing only the site as defined by
-      // `GetSiteForURL`.
-      content::SiteInstance::GetSiteForURL(browser_context, url) != src_url;
+  return !IsSameWebSite(browser_context, src_url, url);
 }
 
 void AtomBrowserClient::AddProcessPreferences(
@@ -225,34 +232,28 @@ void AtomBrowserClient::OverrideSiteInstanceForNavigation(
   }
 
   content::SiteInstance* current_instance = rfh->GetSiteInstance();
-  auto* web_contents = content::WebContents::FromRenderFrameHost(rfh);
-  scoped_refptr<content::SiteInstance> site_instance;
   if (!ShouldCreateNewSiteInstance(rfh, browser_context, current_instance, url))
     return;
 
   // Do we have an affinity site to manage ?
   std::string affinity;
+  auto* web_contents = content::WebContents::FromRenderFrameHost(rfh);
   auto* web_preferences = WebContentsPreferences::From(web_contents);
   if (web_preferences &&
       web_preferences->dict()->GetString("affinity", &affinity) &&
       !affinity.empty()) {
     affinity = base::ToLowerASCII(affinity);
     auto iter = site_per_affinities.find(affinity);
-    if (iter != site_per_affinities.end()) {
-      site_instance = iter->second;
-      *new_instance = site_instance.get();
-      return;
+    GURL dest_site = content::SiteInstance::GetSiteForURL(browser_context, url);
+    if (iter != site_per_affinities.end() &&
+        IsSameWebSite(browser_context, iter->second->GetSiteURL(), dest_site)) {
+      *new_instance = iter->second;
     } else {
-      // We must not provide the url.
-      // This site is "isolated" and must not be taken into account
-      // when Chromium looking at a candidate for an url.
-      site_instance = content::SiteInstance::Create(browser_context);
-      site_per_affinities[affinity] = site_instance.get();
-      *new_instance = site_instance.get();
+      site_per_affinities[affinity] = candidate_instance;
+      *new_instance = candidate_instance;
       // Remember the original web contents for the pending renderer process.
-      auto pending_process = site_instance->GetProcess();
+      auto pending_process = candidate_instance->GetProcess();
       pending_processes_[pending_process->GetID()] = web_contents;
-      return;
     }
   } else {
     if (has_request_started) {
@@ -260,11 +261,10 @@ void AtomBrowserClient::OverrideSiteInstanceForNavigation(
       return;
     }
 
-    // Remember the original web contents for the pending renderer process.
     *new_instance = candidate_instance;
+    // Remember the original web contents for the pending renderer process.
     auto pending_process = candidate_instance->GetProcess();
     pending_processes_[pending_process->GetID()] = web_contents;
-    return;
   }
 }
 
